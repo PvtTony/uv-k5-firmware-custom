@@ -49,6 +49,9 @@
 #endif
 
 #include "version.h"
+#ifdef ENABLE_DOCK
+    #include "driver/st7565.h"
+#endif
 
 #define DMA_INDEX(x, y) (((x) + (y)) % sizeof(UART_DMA_Buffer))
 
@@ -63,6 +66,12 @@ typedef struct {
         uint8_t Padding;
         uint32_t Timestamp;
     } CMD_0801_t; // simulate key press
+
+typedef struct {
+		Header_t Header;
+		uint32_t Timestamp;
+	} CMD_0803_t; // request screen memory
+
 #endif
 typedef struct {
     uint8_t Padding[2];
@@ -662,6 +671,17 @@ static void CMD_0801(const uint8_t *pBuffer)
         }
         gSimulateHold = click ? KEY_INVALID : key;
     }
+
+static void CMD_0803() // dumps the LCD screen memory to the PC. Not used in the Dock, is just for debug purposes
+{
+    const uint8_t screenDumpStatusIdByte = 0xEF;
+    UART_Send(&screenDumpStatusIdByte, 1);
+    UART_Send(gStatusLine, 1024);
+    for (unsigned line = 0; line < FRAME_LINES; line++) {
+        UART_Send(gFrameBuffer[line], 1024);
+    }
+}
+
 #endif
 
 void UART_HandleCommand(void) {
@@ -677,6 +697,10 @@ void UART_HandleCommand(void) {
 #ifdef ENABLE_DOCK
         case 0x0801:
             CMD_0801(UART_Command.Buffer);
+            break;
+
+        case 0x0803: // screen dump
+            CMD_0803();
             break;
 
 #endif
