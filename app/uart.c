@@ -69,8 +69,15 @@ typedef struct {
 
 typedef struct {
 		Header_t Header;
+        uint8_t Diff;
 		uint32_t Timestamp;
 	} CMD_0803_t; // request screen memory
+
+typedef struct {
+    Header_t Header;
+    uint8_t Diff;
+    uint8_t CpLineData[];
+} REPLY_0803_t;
 
 #endif
 typedef struct {
@@ -171,6 +178,11 @@ typedef struct {
     Header_t Header;
     uint32_t Timestamp;
 } CMD_052F_t;
+
+
+#ifdef ENABLE_DOCK
+static uint8_t lastFrameBuffer[FRAME_LINES + 1][LCD_WIDTH];
+#endif
 
 static const uint8_t Obfuscation[16] =
         {
@@ -672,14 +684,76 @@ static void CMD_0801(const uint8_t *pBuffer)
         gSimulateHold = click ? KEY_INVALID : key;
     }
 
-static void CMD_0803() // dumps the LCD screen memory to the PC. Not used in the Dock, is just for debug purposes
+static void AppendFbCompressedLine(const uint8_t *fbLine, const uint8_t linePos, uint8_t cpLine[], uint16_t *cpLineSize)
 {
-    const uint8_t screenDumpStatusIdByte = 0xEF;
-    UART_Send(&screenDumpStatusIdByte, 1);
-    UART_Send(gStatusLine, 1024);
-    for (unsigned line = 0; line < FRAME_LINES; line++) {
-        UART_Send(gFrameBuffer[line], 1024);
+    for (unsigned col = 0; col < LCD_WIDTH; col++)
+    {
+        if (fbLine[col] != 0)
+        {
+            cpLine[*cpLineSize] = fbLine[col];
+            cpLine[*cpLineSize + 1] = col;
+            cpLine[*cpLineSize + 2] = linePos;
+            *cpLineSize += 3;
+        }
     }
+}
+
+static void AppendFbDiffCompressedLine(const uint8_t *fbLine, const uint8_t linePos, uint8_t cpLine[], uint16_t *cpLineSize)
+{
+    for (unsigned col = 0; col < LCD_WIDTH; col++)
+    {
+        if (fbLine[col] != lastFrameBuffer[linePos][col])
+        {
+            cpLine[*cpLineSize] = fbLine[col];
+            cpLine[*cpLineSize + 1] = col;
+            cpLine[*cpLineSize + 2] = linePos;
+            *cpLineSize += 3;
+        }
+    }
+}
+
+static void CMD_0803(const uint8_t *pBuffer) // dumps the LCD screen memory to the PC. Not used in the Dock, is just for debug purposes
+{
+    const CMD_0803_t *pCmd = (const CMD_0803_t *)pBuffer;
+    // 1. 在栈上分配足够大的空间
+    uint8_t replyBuffer[sizeof(REPLY_0803_t) + LCD_WIDTH * FRAME_LINES * 3];  
+    REPLY_0803_t *reply = (REPLY_0803_t *)replyBuffer;
+    
+    uint16_t cpLineSize = 0;
+    // 2. 处理状态行
+
+    if (pCmd->Diff == 0) 
+    {
+        AppendFbCompressedLine(gStatusLine, 0, reply->CpLineData, &cpLineSize);
+        for (unsigned line = 0; line < FRAME_LINES; line++)
+        {
+            //// 3. 处理帧缓冲区
+            AppendFbCompressedLine(gFrameBuffer[line], line + 1, reply->CpLineData, &cpLineSize);
+        }
+    }
+    else if (pCmd->Diff == 1)
+    {
+        AppendFbDiffCompressedLine(gStatusLine, 0, reply->CpLineData, &cpLineSize);
+        for (unsigned line = 0; line < FRAME_LINES; line++)
+        {
+            //// 3. 处理帧缓冲区
+            AppendFbDiffCompressedLine(gFrameBuffer[line], line + 1, reply->CpLineData, &cpLineSize);
+        }
+    }
+    
+    // 更新 FrameBuffer 缓存
+    memcpy(lastFrameBuffer[0], gStatusLine, sizeof(uint8_t) * LCD_WIDTH);
+    for (unsigned line = 0; line < FRAME_LINES; line++)
+    {
+        memcpy(lastFrameBuffer[line + 1], gFrameBuffer[line], sizeof(uint8_t) * LCD_WIDTH);
+    }
+
+    // 4. 设置头部信息
+    reply->Header.ID = 0x803;
+    reply->Header.Size = sizeof(uint8_t) * cpLineSize;
+    reply->Diff = pCmd->Diff;
+    // 5. 发送回复
+    SendReply(reply, sizeof(Header_t) + sizeof(uint8_t) * (cpLineSize + 1));
 }
 
 #endif
@@ -700,7 +774,7 @@ void UART_HandleCommand(void) {
             break;
 
         case 0x0803: // screen dump
-            CMD_0803();
+            CMD_0803(UART_Command.Buffer);
             break;
 
 #endif
